@@ -17,7 +17,12 @@ from tkinter import messagebox
 
 import pytz
 
-from src.location import get_location
+from src.location import (
+    get_location,
+    load_manual_location,
+    save_manual_location,
+    clear_manual_location,
+)
 from src.prayer_api import (
     PRAYER_DISPLAY,
     PRAYER_NAMES,
@@ -53,6 +58,9 @@ FONT_ARABIC = ("Arial", 16, "bold")       # for Arabic/bismillah
 
 WINDOW_W = 480
 WINDOW_H = 720
+
+COMPACT_W = 320
+COMPACT_H = 80
 
 REFRESH_MS = 1000  # update UI every second
 
@@ -101,6 +109,8 @@ class PrayerTimeApp:
         self._next_prayer_name = None
         self._next_prayer_dt = None
         self._reminder_scheduled_for: set = set()  # tracks which prayers got reminders
+        self._is_compact = False  # compact/minimized view state
+        self._full_pos = None  # store position before compact
 
         self._setup_window()
         self._build_ui()
@@ -144,11 +154,12 @@ class PrayerTimeApp:
         root = self.root
 
         # ── outer border frame ───────────────────────────────────────────
-        outer = tk.Frame(root, bg=BORDER_COLOR, bd=0)
-        outer.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+        self._outer_frame = tk.Frame(root, bg=BORDER_COLOR, bd=0)
+        self._outer_frame.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
 
-        inner = tk.Frame(outer, bg=BG_DARK, bd=0)
-        inner.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
+        self._inner_frame = tk.Frame(self._outer_frame, bg=BG_DARK, bd=0)
+        self._inner_frame.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
+        inner = self._inner_frame
 
         # ── title bar (drag zone + close) ────────────────────────────────
         title_bar = tk.Frame(inner, bg=BG_CARD, height=32)
@@ -176,9 +187,39 @@ class PrayerTimeApp:
             command=self.root.destroy,
         ).pack(side=tk.RIGHT, padx=4, pady=4)
 
+        tk.Button(
+            title_bar,
+            text=" ▁ ",
+            font=FONT_PIXEL_SM,
+            fg=TEXT_DIM,
+            bg=BG_CARD,
+            activeforeground=TEXT_WHITE,
+            activebackground="#1a1a3a",
+            bd=0,
+            cursor="hand2",
+            command=self._minimize_to_background,
+        ).pack(side=tk.RIGHT, pady=4)
+
+        tk.Button(
+            title_bar,
+            text=" ─ ",
+            font=FONT_PIXEL_SM,
+            fg=ACCENT_GOLD,
+            bg=BG_CARD,
+            activeforeground=TEXT_WHITE,
+            activebackground="#1a2a1a",
+            bd=0,
+            cursor="hand2",
+            command=self._toggle_compact,
+        ).pack(side=tk.RIGHT, pady=4)
+
+        # ── full-mode content container ────────────────────────────────────
+        self._full_content = tk.Frame(inner, bg=BG_DARK)
+        self._full_content.pack(fill=tk.BOTH, expand=True)
+
         # ── top green pixel border ────────────────────────────────────────
         tk.Label(
-            inner,
+            self._full_content,
             text=PIXEL_BORDER_H,
             font=("Courier", 6),
             fg=BORDER_COLOR,
@@ -187,7 +228,7 @@ class PrayerTimeApp:
 
         # ── Bismillah banner ──────────────────────────────────────────────
         tk.Label(
-            inner,
+            self._full_content,
             text="بِسْمِ اللَّهِ الرَّحْمٰنِ الرَّحِيْمِ",
             font=FONT_ARABIC,
             fg=ACCENT_GOLD,
@@ -196,7 +237,7 @@ class PrayerTimeApp:
         ).pack(fill=tk.X)
 
         # ── pixel mosque art ──────────────────────────────────────────────
-        mosque_frame = tk.Frame(inner, bg=BG_DARK)
+        mosque_frame = tk.Frame(self._full_content, bg=BG_DARK)
         mosque_frame.pack()
         for line in MOSQUE_ART:
             tk.Label(
@@ -208,18 +249,34 @@ class PrayerTimeApp:
             ).pack()
 
         # ── location label ────────────────────────────────────────────────
+        loc_frame = tk.Frame(self._full_content, bg=BG_DARK)
+        loc_frame.pack(pady=(6, 0), fill=tk.X, padx=10)
+
         self.lbl_location = tk.Label(
-            inner,
+            loc_frame,
             text="📍 Detecting location…",
             font=FONT_PIXEL,
             fg=TEXT_DIM,
             bg=BG_DARK,
         )
-        self.lbl_location.pack(pady=(6, 0))
+        self.lbl_location.pack(side=tk.LEFT, expand=True)
+
+        tk.Button(
+            loc_frame,
+            text="📍⟳",
+            font=FONT_PIXEL_SM,
+            fg=ACCENT_GREEN,
+            bg=BG_DARK,
+            activeforeground=TEXT_WHITE,
+            activebackground=BG_HIGHLIGHT,
+            bd=0,
+            cursor="hand2",
+            command=self._show_location_dialog,
+        ).pack(side=tk.RIGHT, padx=4)
 
         # ── Gregorian date ────────────────────────────────────────────────
         self.lbl_date = tk.Label(
-            inner,
+            self._full_content,
             text="",
             font=FONT_PIXEL,
             fg=TEXT_WHITE,
@@ -229,7 +286,7 @@ class PrayerTimeApp:
 
         # ── Hijri date ────────────────────────────────────────────────────
         self.lbl_hijri = tk.Label(
-            inner,
+            self._full_content,
             text="",
             font=FONT_PIXEL,
             fg=ACCENT_GOLD,
@@ -239,7 +296,7 @@ class PrayerTimeApp:
 
         # ── live clock ────────────────────────────────────────────────────
         self.lbl_clock = tk.Label(
-            inner,
+            self._full_content,
             text="00:00:00",
             font=FONT_CLOCK,
             fg=ACCENT_GOLD,
@@ -250,7 +307,7 @@ class PrayerTimeApp:
 
         # ── pixel divider ─────────────────────────────────────────────────
         tk.Label(
-            inner,
+            self._full_content,
             text="◇ ─────────────────────────── ◇",
             font=("Courier", 9),
             fg=BORDER_COLOR,
@@ -258,7 +315,7 @@ class PrayerTimeApp:
         ).pack(pady=2)
 
         # ── prayer times grid ─────────────────────────────────────────────
-        self.prayer_frame = tk.Frame(inner, bg=BG_DARK)
+        self.prayer_frame = tk.Frame(self._full_content, bg=BG_DARK)
         self.prayer_frame.pack(fill=tk.X, padx=10, pady=4)
 
         self.prayer_rows: dict = {}   # prayer_name -> dict of label widgets
@@ -266,7 +323,7 @@ class PrayerTimeApp:
 
         # ── pixel divider ─────────────────────────────────────────────────
         tk.Label(
-            inner,
+            self._full_content,
             text="◇ ─────────────────────────── ◇",
             font=("Courier", 9),
             fg=BORDER_COLOR,
@@ -275,7 +332,7 @@ class PrayerTimeApp:
 
         # ── next prayer countdown ─────────────────────────────────────────
         tk.Label(
-            inner,
+            self._full_content,
             text="NEXT PRAYER",
             font=FONT_PIXEL,
             fg=TEXT_DIM,
@@ -283,7 +340,7 @@ class PrayerTimeApp:
         ).pack()
 
         self.lbl_next_name = tk.Label(
-            inner,
+            self._full_content,
             text="—",
             font=FONT_PIXEL_LG,
             fg=ACCENT_GREEN,
@@ -292,7 +349,7 @@ class PrayerTimeApp:
         self.lbl_next_name.pack()
 
         self.lbl_countdown = tk.Label(
-            inner,
+            self._full_content,
             text="--:--:--",
             font=FONT_CLOCK,
             fg=ACCENT_GOLD,
@@ -301,7 +358,7 @@ class PrayerTimeApp:
         self.lbl_countdown.pack()
 
         # ── Fajr / Maghrib highlight block (Ramadan info) ─────────────────
-        ram_frame = tk.Frame(inner, bg=BG_HIGHLIGHT, bd=1, relief=tk.RIDGE)
+        ram_frame = tk.Frame(self._full_content, bg=BG_HIGHLIGHT, bd=1, relief=tk.RIDGE)
         ram_frame.pack(fill=tk.X, padx=14, pady=8)
 
         tk.Label(
@@ -330,7 +387,7 @@ class PrayerTimeApp:
         self.lbl_maghrib_remain.pack(side=tk.RIGHT)
 
         # ── notification banner (hidden by default) ───────────────────────
-        self.notif_frame = tk.Frame(inner, bg="#2d1b00", bd=1, relief=tk.RIDGE)
+        self.notif_frame = tk.Frame(self._full_content, bg="#2d1b00", bd=1, relief=tk.RIDGE)
         self.lbl_notif_title = tk.Label(
             self.notif_frame,
             text="",
@@ -352,12 +409,38 @@ class PrayerTimeApp:
 
         # ── bottom pixel border ───────────────────────────────────────────
         tk.Label(
-            inner,
+            self._full_content,
             text=PIXEL_BORDER_B,
             font=("Courier", 6),
             fg=BORDER_COLOR,
             bg=BG_DARK,
         ).pack(fill=tk.X, side=tk.BOTTOM)
+
+        # ── compact-mode content (hidden by default) ──────────────────────
+        self._compact_content = tk.Frame(inner, bg=BG_DARK)
+        # Not packed yet — shown only in compact mode
+
+        self.lbl_compact_next = tk.Label(
+            self._compact_content,
+            text="—  --:--:--",
+            font=FONT_PIXEL_LG,
+            fg=ACCENT_GOLD,
+            bg=BG_DARK,
+        )
+        self.lbl_compact_next.pack(side=tk.LEFT, padx=8, pady=6, expand=True)
+
+        tk.Button(
+            self._compact_content,
+            text=" ◻ ",
+            font=FONT_PIXEL_SM,
+            fg=ACCENT_GREEN,
+            bg=BG_DARK,
+            activeforeground=TEXT_WHITE,
+            activebackground=BG_HIGHLIGHT,
+            bd=0,
+            cursor="hand2",
+            command=self._toggle_compact,
+        ).pack(side=tk.RIGHT, padx=6, pady=6)
 
     def _build_prayer_rows(self):
         """Create labelled rows in the prayer grid for each prayer."""
@@ -425,7 +508,11 @@ class PrayerTimeApp:
     def _load_data(self):
         """Fetch location + prayer times in background thread."""
         try:
-            self.location = get_location()
+            manual = load_manual_location()
+            if manual:
+                self.location = manual
+            else:
+                self.location = get_location()
             try:
                 self.tz = pytz.timezone(self.location["timezone"])
             except Exception:
@@ -591,9 +678,15 @@ class PrayerTimeApp:
             self.lbl_next_name.config(fg=fg)
             color = TEXT_RED if secs < 300 else ACCENT_GOLD
             self.lbl_countdown.config(text=_fmt_countdown(secs), fg=color)
+            # Update compact view
+            self.lbl_compact_next.config(
+                text=f"{PRAYER_DISPLAY[next_name]}  {_fmt_countdown(secs)}",
+                fg=fg,
+            )
         else:
             self.lbl_next_name.config(text="All prayers done for today ✓")
             self.lbl_countdown.config(text="——:——:——")
+            self.lbl_compact_next.config(text="All done ✓  ——:——:——", fg=TEXT_DIM)
 
     def _update_fajr_maghrib(self, now, tz):
         """Update the Ramadan Fajr/Maghrib remaining time labels."""
@@ -610,6 +703,171 @@ class PrayerTimeApp:
             self.lbl_maghrib_remain.config(text=_fmt_countdown(secs_maghrib))
         else:
             self.lbl_maghrib_remain.config(text="passed ✓", fg=TEXT_DIM)
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Compact mode / minimize
+    # ──────────────────────────────────────────────────────────────────────
+    def _toggle_compact(self):
+        """Toggle between full and compact (small rectangle) view."""
+        if self._is_compact:
+            # Restore to full view
+            self._compact_content.pack_forget()
+            self._full_content.pack(fill=tk.BOTH, expand=True)
+            x = self.root.winfo_x()
+            y = self.root.winfo_y()
+            self.root.geometry(f"{WINDOW_W}x{WINDOW_H}+{x}+{y}")
+            self._is_compact = False
+        else:
+            # Switch to compact view
+            self._full_content.pack_forget()
+            self._compact_content.pack(fill=tk.BOTH, expand=True)
+            x = self.root.winfo_x()
+            y = self.root.winfo_y()
+            self.root.geometry(f"{COMPACT_W}x{COMPACT_H}+{x}+{y}")
+            self._is_compact = True
+
+    def _minimize_to_background(self):
+        """Hide the window (minimize to background) while keeping the app running."""
+        self.root.withdraw()
+        # Show a small restore button as a separate top-level window
+        if not hasattr(self, '_restore_win') or self._restore_win is None:
+            self._restore_win = tk.Toplevel(self.root)
+            self._restore_win.overrideredirect(True)
+            self._restore_win.attributes("-topmost", True)
+            self._restore_win.attributes("-alpha", 0.85)
+            self._restore_win.configure(bg=BORDER_COLOR)
+            screen_w = self.root.winfo_screenwidth()
+            self._restore_win.geometry(f"36x36+{screen_w - 50}+10")
+            tk.Button(
+                self._restore_win,
+                text="🕌",
+                font=("Arial", 14),
+                fg=ACCENT_GOLD,
+                bg=BG_CARD,
+                activebackground=BG_HIGHLIGHT,
+                bd=0,
+                cursor="hand2",
+                command=self._restore_from_background,
+            ).pack(fill=tk.BOTH, expand=True)
+            # Allow dragging the restore button
+            self._restore_win.bind("<ButtonPress-1>", self._on_restore_drag_start)
+            self._restore_win.bind("<B1-Motion>", self._on_restore_drag_motion)
+        else:
+            self._restore_win.deiconify()
+
+    def _on_restore_drag_start(self, event):
+        self._restore_drag_x = event.x_root - self._restore_win.winfo_x()
+        self._restore_drag_y = event.y_root - self._restore_win.winfo_y()
+
+    def _on_restore_drag_motion(self, event):
+        self._restore_win.geometry(
+            f"+{event.x_root - self._restore_drag_x}+{event.y_root - self._restore_drag_y}"
+        )
+
+    def _restore_from_background(self):
+        """Restore the main window from background."""
+        if hasattr(self, '_restore_win') and self._restore_win is not None:
+            self._restore_win.withdraw()
+        self.root.deiconify()
+        self.root.attributes("-topmost", True)
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Location dialog
+    # ──────────────────────────────────────────────────────────────────────
+    def _show_location_dialog(self):
+        """Show a dialog to set or refresh location."""
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Set Location")
+        dlg.configure(bg=BG_DARK)
+        dlg.geometry("380x340")
+        dlg.resizable(False, False)
+        dlg.attributes("-topmost", True)
+        dlg.transient(self.root)
+        dlg.grab_set()
+
+        tk.Label(
+            dlg, text="📍 Set Location", font=FONT_TITLE,
+            fg=ACCENT_GOLD, bg=BG_DARK,
+        ).pack(pady=(10, 6))
+
+        fields_frame = tk.Frame(dlg, bg=BG_DARK)
+        fields_frame.pack(fill=tk.X, padx=20, pady=4)
+
+        labels = ["City:", "Region:", "Country:", "Latitude:", "Longitude:", "Timezone:"]
+        keys = ["city", "region", "country", "lat", "lon", "timezone"]
+        entries = {}
+
+        for i, (label, key) in enumerate(zip(labels, keys)):
+            tk.Label(
+                fields_frame, text=label, font=FONT_PIXEL_SM,
+                fg=TEXT_WHITE, bg=BG_DARK, anchor="w", width=10,
+            ).grid(row=i, column=0, sticky="w", pady=2)
+            ent = tk.Entry(
+                fields_frame, font=FONT_PIXEL_SM,
+                fg=TEXT_WHITE, bg=BG_CARD, insertbackground=TEXT_WHITE,
+                width=28, relief=tk.FLAT,
+            )
+            ent.grid(row=i, column=1, sticky="ew", pady=2, padx=(4, 0))
+            # Pre-fill with current location
+            if self.location and key in self.location:
+                ent.insert(0, str(self.location[key]))
+            entries[key] = ent
+
+        fields_frame.columnconfigure(1, weight=1)
+
+        btn_frame = tk.Frame(dlg, bg=BG_DARK)
+        btn_frame.pack(pady=10)
+
+        def _apply():
+            try:
+                loc = {
+                    "city": entries["city"].get().strip(),
+                    "region": entries["region"].get().strip(),
+                    "country": entries["country"].get().strip(),
+                    "lat": float(entries["lat"].get().strip()),
+                    "lon": float(entries["lon"].get().strip()),
+                    "timezone": entries["timezone"].get().strip(),
+                }
+            except ValueError:
+                messagebox.showerror(
+                    "Invalid input",
+                    "Latitude and Longitude must be numbers.",
+                    parent=dlg,
+                )
+                return
+            save_manual_location(loc)
+            dlg.destroy()
+            self._reload_data()
+
+        def _refresh_ip():
+            clear_manual_location()
+            dlg.destroy()
+            self._reload_data()
+
+        tk.Button(
+            btn_frame, text="  Save  ", font=FONT_PIXEL_SM,
+            fg=BG_DARK, bg=ACCENT_GREEN, activebackground="#2ea043",
+            bd=0, cursor="hand2", command=_apply,
+        ).pack(side=tk.LEFT, padx=6)
+
+        tk.Button(
+            btn_frame, text="  Refresh from IP  ", font=FONT_PIXEL_SM,
+            fg=BG_DARK, bg=ACCENT_GOLD, activebackground="#c0a030",
+            bd=0, cursor="hand2", command=_refresh_ip,
+        ).pack(side=tk.LEFT, padx=6)
+
+        tk.Button(
+            btn_frame, text="  Cancel  ", font=FONT_PIXEL_SM,
+            fg=TEXT_WHITE, bg=BG_CARD, activebackground=BG_HIGHLIGHT,
+            bd=0, cursor="hand2", command=dlg.destroy,
+        ).pack(side=tk.LEFT, padx=6)
+
+    def _reload_data(self):
+        """Reload location and prayer times."""
+        self._loading = True
+        self.lbl_location.config(text="📍 Refreshing location…", fg=TEXT_DIM)
+        t = threading.Thread(target=self._load_data, daemon=True)
+        t.start()
 
 
 # ──────────────────────────────────────────────────────────────────────────────

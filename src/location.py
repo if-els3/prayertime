@@ -1,4 +1,7 @@
-"""Location detection using IP geolocation."""
+"""Location detection using IP geolocation and manual config."""
+
+import json
+import os
 
 import requests
 
@@ -13,6 +16,9 @@ DEFAULT_LOCATION = {
 }
 
 IPAPI_URL = "http://ip-api.com/json/"
+
+CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".prayertime")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "location.json")
 
 
 def get_location(timeout: int = 5) -> dict:
@@ -42,3 +48,31 @@ def get_location(timeout: int = 5) -> dict:
     except Exception:
         pass
     return dict(DEFAULT_LOCATION)
+
+
+def save_manual_location(location: dict) -> None:
+    """Save a manually-set location to the config file."""
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(location, f, indent=2)
+
+
+def load_manual_location() -> dict | None:
+    """Load a previously saved manual location, or return None."""
+    if not os.path.isfile(CONFIG_FILE):
+        return None
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        required = ("city", "region", "country", "lat", "lon", "timezone")
+        if all(k in data for k in required):
+            return data
+    except Exception:
+        pass
+    return None
+
+
+def clear_manual_location() -> None:
+    """Remove the saved manual location config."""
+    if os.path.isfile(CONFIG_FILE):
+        os.remove(CONFIG_FILE)
